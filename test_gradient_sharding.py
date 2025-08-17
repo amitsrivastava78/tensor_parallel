@@ -123,21 +123,7 @@ def test_gradient_sharding():
         except Exception as e:
             print(f"❌ Direct gradient operations failed: {e}")
         
-        # Test communications operations
-        print("\n📡 Testing communications operations...")
-        try:
-            from src.tensor_parallel_keras.communications_keras import reduce_scatter_gradients
-            
-            # Create dummy gradients
-            import torch
-            dummy_gradients = [torch.randn(5, 10) for _ in range(2)]
-            
-            # Test reduce-scatter
-            sharded_gradients = reduce_scatter_gradients(dummy_gradients, 2, op="mean", dim=-1)
-            print(f"✅ Reduce-scatter successful! Sharded gradients: {len(sharded_gradients)}")
-            
-        except Exception as e:
-            print(f"❌ Communications operations failed: {e}")
+
         
         print("\n" + "=" * 60)
         print("🎉 Gradient Sharding Test Completed! 🎉")

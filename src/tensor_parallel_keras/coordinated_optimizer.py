@@ -14,15 +14,12 @@ import logging
 try:
     from .distributed_backend import get_distributed_backend, DistributedBackend
     from .gradient_operations import create_gradient_sharding_manager, GradientShardingManager
-    from .communications_keras import reduce_scatter_gradients, allreduce_gradients
 except ImportError:
     # Fallback if modules are not available
     DistributedBackend = None
     get_distributed_backend = None
     create_gradient_sharding_manager = None
     GradientShardingManager = None
-    reduce_scatter_gradients = None
-    allreduce_gradients = None
 
 logger = logging.getLogger(__name__)
 
@@ -242,27 +239,8 @@ class CoordinatedOptimizer:
         if self.gradient_manager:
             return self.gradient_manager.synchronize_gradients(device_rank, local_gradients)
         else:
-            # Fallback: use communications module directly
-            if reduce_scatter_gradients:
-                try:
-                    # For now, simulate gradients from all devices
-                    # In a real implementation, you'd collect gradients from all devices
-                    all_device_gradients = [local_gradients] * self.world_size
-                    
-                    # Use reduce-scatter operation
-                    sharded_gradients = reduce_scatter_gradients(
-                        all_device_gradients, self.world_size, op="mean", dim=-1
-                    )
-                    
-                    # Return the shard for the current device
-                    return sharded_gradients[device_rank] if device_rank < len(sharded_gradients) else local_gradients
-                    
-                except Exception as e:
-                    logger.error(f"Reduce-scatter gradient synchronization failed: {e}")
-                    return local_gradients
-            else:
-                # Ultimate fallback: return local gradients
-                return local_gradients
+            # Ultimate fallback: return local gradients
+            return local_gradients
     
     def apply_gradients(self, device_rank: int, synchronized_gradients: List[torch.Tensor],
                        trainable_variables: List[torch.Tensor]):

@@ -13,12 +13,6 @@ from keras import layers, Model
 
 from keras import device
 
-from .autoconfig_keras import get_default_config_keras
-from .config_keras import ConfigKeras
-from .parameter_sharding import make_parameter_sharded_model
-from .sharding_keras import ShardedKeras
-from .communications_keras import allgather_outputs, reduce_scatter_gradients
-from .coordinated_optimizer import TensorParallelOptimizer
 from .gradient_operations import create_gradient_sharding_manager
 from .coordinated_optimizer import CoordinatedOptimizer
 from .optimizer_sharding import create_optimizer_sharding_manager
@@ -557,206 +551,11 @@ class TensorParallelKeras(keras.Model):
         except Exception as e:
             logger.error(f"Fallback training also failed: {e}")
             
-    def _compute_gradients_with_fsdp(self, x, y, y_pred, sample_weight):
-        """
-        Compute gradients using FSDP-style parameter sharding.
-        
-        This method implements the gradient computation part of FSDP:
-        1. Model structure stays intact
-        2. Gradients are computed for parameter shards
-        3. Communication happens at parameter level
-        """
-        try:
-            logger.info("Using FSDP-style gradient computation")
-            
-            # Convert to PyTorch tensors for gradient computation
-            if hasattr(y_pred, 'numpy'):
-                y_pred_torch = torch.tensor(y_pred.numpy(), requires_grad=True)
-            else:
-                y_pred_torch = torch.tensor(y_pred, requires_grad=True)
-            
-            if hasattr(y, 'numpy'):
-                y_torch = torch.tensor(y.numpy())
-            else:
-                y_torch = torch.tensor(y)
-            
-            # Compute loss in PyTorch
-            loss_torch = torch.nn.functional.mse_loss(y_pred_torch, y_torch)
-            
-            # Get trainable variables from FSDP parameter shards
-            all_trainable_vars = []
-            for device_rank in range(self.world_size):
-                if device_rank in self.parameter_shards:
-                    device_params = self.parameter_shards[device_rank]
-                    for param_name, param_shard in device_params.items():
-                        param_tensor = param_shard.get_shard_tensor()
-                        all_trainable_vars.append(param_tensor)
-            
-            # Convert to PyTorch tensors
-            torch_vars = []
-            for var in all_trainable_vars:
-                if hasattr(var, 'numpy'):
-                    torch_var = torch.tensor(var.numpy(), requires_grad=True)
-                else:
-                    torch_var = torch.tensor(var, requires_grad=True)
-                torch_vars.append(torch_var)
-            
-            # Compute gradients
-            if self.gradient_managers and 0 in self.gradient_managers:
-                gradients = self.gradient_managers[0].compute_local_gradients(loss_torch, torch_vars)
-            else:
-                logger.warning("No gradient manager available")
-                return None
-            
-            logger.info(f"Computed {len(gradients)} gradients using gradient sharding manager")
-            return gradients
-        
-        except Exception as e:
-            logger.error(f"FSDP gradient computation failed: {e}")
-            
-            # Fallback: use coordinated optimizer if available
-            if hasattr(self, 'coordinated_optimizer'):
-                logger.info("Using coordinated optimizer for gradient computation")
-                
-                # Convert to PyTorch tensors
-                if hasattr(y_pred, 'numpy'):
-                    y_pred_torch = torch.tensor(y_pred.numpy(), requires_grad=True)
-                else:
-                    y_pred_torch = torch.tensor(y_pred, requires_grad=True)
-                
-                if hasattr(y, 'numpy'):
-                    y_torch = torch.tensor(y.numpy())
-                else:
-                    y_torch = torch.tensor(y)
-                
-                # Compute loss
-                loss_torch = torch.nn.functional.mse_loss(y_pred_torch, y_torch)
-                
-                # Get trainable variables from FSDP parameter shards
-                if self.parameter_shards and 0 in self.parameter_shards:
-                    device_params = self.parameter_shards[0]
-                    torch_vars = []
-                    for param_name, param_shard in device_params.items():
-                        param_tensor = param_shard.get_shard_tensor()
-                        torch_vars.append(param_tensor)
-                    
-                    # Compute gradients using coordinated optimizer
-                    gradients = self.coordinated_optimizer.compute_gradients(loss_torch, torch_vars)
-                    logger.info(f"Computed {len(gradients)} gradients using coordinated optimizer")
-                    return gradients
-            
-            # Ultimate fallback: return None
-            logger.warning("No gradient computation method available")
-            return None
     
-    def _apply_gradients_to_fsdp_shards(self, gradients):
-        """
-        Apply gradients to all FSDP parameter shards with proper synchronization.
-        
-        This method implements the gradient application part of FSDP:
-        1. Synchronize gradients across all devices using reduce-scatter
-        2. Apply synchronized gradients to each device's parameter shards
-        """
-        if len(self.parameter_shards) <= 1:
-            return
-        
-        try:
-            if self.gradient_managers:
-                logger.info("Using gradient sharding managers for gradient application")
-                
-                # Synchronize gradients across all devices
-                for device_rank in range(self.world_size):
-                    # Get parameter shards for this device
-                    if device_rank in self.parameter_shards:
-                        device_params = self.parameter_shards[device_rank]
-                        
-                        # Convert parameter shards to PyTorch tensors
-                        torch_vars = []
-                        for param_name, param_shard in device_params.items():
-                            param_tensor = param_shard.get_shard_tensor()
-                            torch_vars.append(param_tensor)
-                        
-                        # Synchronize gradients for this device
-                        if device_rank in self.gradient_managers:
-                            synchronized_grads = self.gradient_managers[device_rank].synchronize_gradients(
-                                device_rank, gradients
-                            )
-                            
-                            # Apply synchronized gradients
-                            if device_rank in self.gradient_managers:
-                                self.gradient_managers[device_rank].apply_synchronized_gradients(
-                                    device_rank, synchronized_grads, torch_vars, None
-                                )
-                            else:
-                                logger.warning(f"No gradient manager for device {device_rank}")
-                            
-                            logger.info(f"Applied synchronized gradients to device {device_rank}")
-                
-                logger.info("Gradient application completed successfully using gradient sharding")
-                
-            elif hasattr(self, 'coordinated_optimizer'):
-                logger.info("Using coordinated optimizer for gradient application")
-                
-                # Use coordinated optimizer to apply gradients
-                for device_rank in range(self.world_size):
-                    if device_rank < len(self.parameter_shards):
-                        model_shard = self.parameter_shards[device_rank]
-                        if hasattr(model_shard, 'trainable_variables'):
-                            trainable_vars = model_shard.trainable_variables
-                            
-                            # Convert to PyTorch tensors
-                            torch_vars = []
-                            for var in trainable_vars:
-                                if hasattr(var, 'numpy'):
-                                    torch_var = torch.tensor(var.numpy())
-                                else:
-                                    torch_var = torch.tensor(var)
-                                torch_vars.append(torch_var)
-                            
-                            # Apply gradients using coordinated optimizer
-                            self.coordinated_optimizer.apply_gradients(
-                                device_rank, gradients, torch_vars
-                            )
-                            
-                            logger.info(f"Applied gradients to device {device_rank} using coordinated optimizer")
-                
-                logger.info("Gradient application completed successfully using coordinated optimizer")
-                
-            else:
-                # Fallback: manual gradient application
-                logger.warning("Using manual gradient application fallback")
-                self._apply_gradients_manually(gradients)
-                
-        except Exception as e:
-            logger.error(f"Gradient application failed: {e}")
-            # Continue training even if gradient application fails
     
-    def _apply_gradients_manually(self, gradients):
-        """Manual fallback for gradient application."""
-        try:
-            # Simple manual gradient application
-            for i, device_params in self.parameter_shards.items():
-                if hasattr(model_shard, 'trainable_variables'):
-                    for j, var in enumerate(model_shard.trainable_variables):
-                        if j < len(gradients) and gradients[j] is not None:
-                            # Apply a small update to simulate learning
-                            current_value = var.numpy() if hasattr(var, 'numpy') else var
-                            if hasattr(gradients[j], 'numpy'):
-                                grad_value = gradients[j].numpy()
-                            else:
-                                grad_value = gradients[j]
-                            
-                            # Simple SGD update
-                            update = -0.001 * grad_value
-                            new_value = current_value + update
-                            var.assign(new_value)
-                            
-                            logger.debug(f"Manually updated variable {var.name} in shard {i}")
-            
-            logger.info("Manual gradient application completed")
-            
-        except Exception as e:
-            logger.error(f"Manual gradient application failed: {e}")
+
+    
+
     
     def fit(self, x=None, y=None, **kwargs):
         """Custom fit method that ensures gradient synchronization."""
@@ -1038,33 +837,7 @@ class TensorParallelKeras(keras.Model):
         })
         return config 
 
-    def auto_detect_parallelism(self):
-        """Automatically detect optimal parallelism settings."""
-        try:
-            from .distribution_lib import list_devices, get_best_devices
-            
-            # Get all available devices
-            all_devices = list_devices()
-            print(f"🔍 Available devices: {all_devices}")
-            
-            # Update world_size based on available devices
-            optimal_world_size = len(all_devices)
-            if optimal_world_size != self.world_size:
-                print(f"🔄 Updating world_size from {self.world_size} to {optimal_world_size}")
-                self.world_size = optimal_world_size
-            
-            # Update device_ids to use best available devices
-            optimal_devices = get_best_devices(self.world_size)
-            if optimal_devices != self.device_ids:
-                print(f"🔄 Updating device_ids from {self.device_ids} to {optimal_devices}")
-                self.device_ids = optimal_devices
-            
-            print(f"✅ Auto-detection complete: world_size={self.world_size}, devices={self.device_ids}")
-            return True
-            
-        except Exception as e:
-            print(f"⚠️  Auto-detection failed: {e}")
-            return False
+
     
     def get_parallelism_info(self):
         """Get current parallelism configuration information."""

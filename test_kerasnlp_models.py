@@ -296,8 +296,8 @@ def test_einsum_dense_layers():
     )
     
     print(f"✅ {time.time() - start_time:.2f}s: Tensor parallel EinsumDense model created successfully")
-    print(f"      Number of shards: {len(tp_model.model_shards)}")
-    print(f"      Devices: {tp_model.devices}")
+    print(f"      Number of devices: {tp_model.world_size}")
+    print(f"      Parameter shards: {len(tp_model.parameter_shards)}")
     
     print(f"⏱️  {time.time() - start_time:.2f}s: Testing inference...")
     
@@ -375,8 +375,8 @@ def test_mixed_layer_types():
     )
     
     print(f"✅ {time.time() - start_time:.2f}s: Tensor parallel mixed layer model created successfully")
-    print(f"      Number of shards: {len(tp_model.model_shards)}")
-    print(f"      Devices: {tp_model.devices}")
+    print(f"      Number of devices: {tp_model.world_size}")
+    print(f"      Parameter shards: {len(tp_model.parameter_shards)}")
     
     print(f"⏱️  {time.time() - start_time:.2f}s: Testing inference...")
     
