@@ -135,13 +135,12 @@ def test_gradient_sharding():
         print(f"   • Distributed backend: {'✅ Available' if parallelism_info['distributed_backend'] else '❌ Not available'}")
         print(f"   • Parameter shards: {gradient_info.get('parameter_shards', 'N/A')}")
         
-        return True
         
     except Exception as e:
         print(f"\n❌ Test failed with error: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        raise
 
 def test_coordinated_optimizer():
     """Test the coordinated optimizer functionality."""
@@ -170,21 +169,30 @@ def test_coordinated_optimizer():
         param_shards = tp_optimizer.get_parameter_shards()
         print(f"📋 Parameter shards: {param_shards}")
         
-        return True
         
     except Exception as e:
         print(f"❌ Coordinated optimizer test failed: {e}")
-        return False
+        raise
 
 if __name__ == "__main__":
     print("🚀 Starting Gradient Sharding Tests 🚀")
     print("=" * 60)
     
     # Test gradient sharding
-    success1 = test_gradient_sharding()
+    try:
+        test_gradient_sharding()
+        success1 = True
+    except Exception as e:
+        success1 = False
+        print(f"Gradient sharding test failed: {e}")
     
     # Test coordinated optimizer
-    success2 = test_coordinated_optimizer()
+    try:
+        test_coordinated_optimizer()
+        success2 = True
+    except Exception as e:
+        success2 = False
+        print(f"Coordinated optimizer test failed: {e}")
     
     # Overall result
     print("\n" + "=" * 60)

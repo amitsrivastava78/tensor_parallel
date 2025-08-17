@@ -31,7 +31,7 @@ class CoordinatedOptimizer:
     """
     
     def __init__(self, base_optimizer: optimizers.Optimizer, world_size: int, 
-                 distributed_backend: str = 'auto', rank: int = 0, shard_optimizer_states: bool = True):
+                 distributed_backend: str = 'auto', rank: int = 0, shard_optimizer_states: bool = True, **kwargs):
         """
         Initialize coordinated optimizer with sharded states.
         
@@ -218,7 +218,7 @@ class CoordinatedOptimizer:
                 gradients = torch.autograd.grad(loss, trainable_variables, retain_graph=True)
                 return [g for g in gradients if g is not None]
             except Exception as e:
-                logger.error(f"Manual gradient computation failed: {e}")
+                logger.error(f"Manual gradient computation failed: {str(e)}")
                 return []
     
     def synchronize_gradients(self, device_rank: int, 

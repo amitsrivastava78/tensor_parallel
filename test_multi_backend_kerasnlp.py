@@ -38,7 +38,7 @@ def test_bert_with_jax_backend():
     tp_bert = TensorParallelKeras(
         model=bert_model,
         world_size=2,
-        distributed_backend='jax'
+        distributed_backend_type='jax'
     )
     print(f"✅ {time.time() - start_time:.2f}s: Tensor parallel BERT model created successfully with JAX backend")
     
@@ -109,7 +109,7 @@ def test_gpt2_with_pytorch_backend():
     tp_gpt2 = TensorParallelKeras(
         model=gpt2_model,
         world_size=2,
-        distributed_backend='pytorch'
+        distributed_backend_type='pytorch'
     )
     print(f"✅ {time.time() - start_time:.2f}s: Tensor parallel GPT-2 model created successfully with PyTorch backend")
     
@@ -166,7 +166,7 @@ def test_roberta_with_tensorflow_backend():
     tp_roberta = TensorParallelKeras(
         model=roberta_model,
         world_size=2,
-        distributed_backend='tensorflow'
+        distributed_backend_type='tensorflow'
     )
     print(f"✅ {time.time() - start_time:.2f}s: Tensor parallel RoBERTa model created successfully with TensorFlow backend")
     

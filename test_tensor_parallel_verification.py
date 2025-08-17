@@ -70,7 +70,7 @@ def test_parameter_sharding_verification():
     tp_model = TensorParallelKeras(
         model=model,
         world_size=4,
-        distributed_backend='fallback'
+        distributed_backend_type='fallback'
     )
     
     # Count sharded parameters (FSDP approach)
@@ -101,7 +101,6 @@ def test_parameter_sharding_verification():
                 print(f"         Device {device_rank}, {param_name}: {param_shard.shard_shape} (full: {param_shard.full_shape})")
     
     print(f"✅ Parameter sharding verification completed in {time.time() - start_time:.2f}s")
-    return True
 
 def test_inference_numerical_correctness():
     """Test inference numerical correctness."""
@@ -174,7 +173,6 @@ def test_inference_numerical_correctness():
         print(f"      ✅ Output shape verification passed")
     
     print(f"✅ Inference correctness test completed in {time.time() - start_time:.2f}s")
-    return True
 
 def test_gradient_synchronization_verification():
     """Test gradient synchronization verification."""
@@ -224,7 +222,6 @@ def test_gradient_synchronization_verification():
         print(f"      ⚠️  Gradient computation failed: {e}")
     
     print(f"✅ Gradient synchronization test completed in {time.time() - start_time:.2f}s")
-    return True
 
 def test_optimizer_sharding_verification():
     """Test optimizer sharding verification."""
@@ -278,7 +275,6 @@ def test_optimizer_sharding_verification():
             print(f"      ❌ {opt_name} compilation failed: {e}")
     
     print(f"✅ Optimizer sharding verification completed in {time.time() - start_time:.2f}s")
-    return True
 
 
 def test_einsum_dense_verification():
@@ -321,7 +317,7 @@ def test_einsum_dense_verification():
     tp_model = TensorParallelKeras(
         model=model,
         world_size=2,
-        distributed_backend='fallback'
+        distributed_backend_type='fallback'
     )
     
     print(f"✅ {time.time() - start_time:.2f}s: Tensor parallel EinsumDense model created")
@@ -398,7 +394,6 @@ def test_einsum_dense_verification():
         raise
     
     print(f"✅ EinsumDense verification completed in {time.time() - start_time:.2f}s")
-    return True
 
 
 def test_end_to_end_training_verification():
@@ -468,7 +463,6 @@ def test_end_to_end_training_verification():
         print(f"      ❌ Training failed: {e}")
     
     print(f"✅ End-to-end training test completed in {time.time() - start_time:.2f}s")
-    return True
 
 if __name__ == "__main__":
     print("🎯 COMPREHENSIVE TENSOR PARALLEL VERIFICATION TEST SUITE")
@@ -478,22 +472,52 @@ if __name__ == "__main__":
     test_results = []
     
     # Test 1: Parameter Sharding
-    test_results.append(("Parameter Sharding", test_parameter_sharding_verification()))
+    try:
+        test_parameter_sharding_verification()
+        test_results.append(("Parameter Sharding", True))
+    except Exception as e:
+        test_results.append(("Parameter Sharding", False))
+        print(f"Parameter Sharding test failed: {e}")
     
     # Test 2: Inference Correctness
-    test_results.append(("Inference Correctness", test_inference_numerical_correctness()))
+    try:
+        test_inference_numerical_correctness()
+        test_results.append(("Inference Correctness", True))
+    except Exception as e:
+        test_results.append(("Inference Correctness", False))
+        print(f"Inference Correctness test failed: {e}")
     
     # Test 3: Gradient Synchronization
-    test_results.append(("Gradient Synchronization", test_gradient_synchronization_verification()))
+    try:
+        test_gradient_synchronization_verification()
+        test_results.append(("Gradient Synchronization", True))
+    except Exception as e:
+        test_results.append(("Gradient Synchronization", False))
+        print(f"Gradient Synchronization test failed: {e}")
     
     # Test 4: Optimizer Sharding
-    test_results.append(("Optimizer Sharding", test_optimizer_sharding_verification()))
+    try:
+        test_optimizer_sharding_verification()
+        test_results.append(("Optimizer Sharding", True))
+    except Exception as e:
+        test_results.append(("Optimizer Sharding", False))
+        print(f"Optimizer Sharding test failed: {e}")
 
     # Test 5: EinsumDense Verification
-    test_results.append(("EinsumDense Verification", test_einsum_dense_verification()))
+    try:
+        test_einsum_dense_verification()
+        test_results.append(("EinsumDense Verification", True))
+    except Exception as e:
+        test_results.append(("EinsumDense Verification", False))
+        print(f"EinsumDense Verification test failed: {e}")
     
     # Test 6: End-to-End Training
-    test_results.append(("End-to-End Training", test_end_to_end_training_verification()))
+    try:
+        test_end_to_end_training_verification()
+        test_results.append(("End-to-End Training", True))
+    except Exception as e:
+        test_results.append(("End-to-End Training", False))
+        print(f"End-to-End Training test failed: {e}")
     
     # Print comprehensive results
     print("\n" + "=" * 70)

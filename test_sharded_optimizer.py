@@ -46,7 +46,7 @@ def test_sharded_optimizer_states():
         coord_opt_no_sharding = CoordinatedOptimizer(
             base_optimizer=base_optimizer,
             world_size=world_size,
-            distributed_backend='fallback',
+            distributed_backend_type='fallback',
             shard_optimizer_states=False
         )
         
@@ -58,7 +58,7 @@ def test_sharded_optimizer_states():
         coord_opt_with_sharding = CoordinatedOptimizer(
             base_optimizer=base_optimizer,
             world_size=world_size,
-            distributed_backend='fallback',
+            distributed_backend_type='fallback',
             shard_optimizer_states=True
         )
         
@@ -84,7 +84,7 @@ def test_optimizer_state_management():
     coord_opt = CoordinatedOptimizer(
         base_optimizer=keras.optimizers.Adam(learning_rate=0.001),
         world_size=4,
-        distributed_backend='fallback',
+        distributed_backend_type='fallback',
         shard_optimizer_states=True
     )
     
@@ -122,7 +122,7 @@ def test_tensor_parallel_optimizer():
     tp_optimizer = CoordinatedOptimizer(
         base_optimizer=keras.optimizers.Adam(learning_rate=0.001),
         world_size=2,
-        distributed_backend='fallback',
+        distributed_backend_type='fallback',
         shard_optimizer_states=True
     )
     

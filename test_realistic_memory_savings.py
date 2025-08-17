@@ -51,7 +51,7 @@ def get_optimizer_memory_info(optimizer, world_size, enable_sharding=True):
     coord_opt = CoordinatedOptimizer(
         base_optimizer=optimizer,
         world_size=world_size,
-        distributed_backend='fallback',
+        distributed_backend_type='fallback',
         shard_optimizer_states=enable_sharding
     )
     

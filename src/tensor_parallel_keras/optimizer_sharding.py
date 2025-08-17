@@ -357,6 +357,52 @@ class OptimizerShardingManager:
         except Exception as e:
             logger.warning(f"Error during cleanup: {e}")
 
+    def apply_gradients(self, device_rank: int, gradients: List[torch.Tensor], 
+                       parameters: List[torch.Tensor], learning_rate: float = 0.001) -> bool:
+        """
+        Apply gradients to parameters using sharded optimizer states.
+        
+        Args:
+            device_rank: Rank of the device
+            gradients: List of gradients to apply
+            parameters: List of parameters to update
+            learning_rate: Learning rate for the update
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            if device_rank not in self.optimizer_states:
+                logger.error(f"No optimizer states for device {device_rank}")
+                return False
+            
+            device_states = self.optimizer_states[device_rank]
+            
+            # Apply gradients to each parameter
+            for i, (grad, param) in enumerate(zip(gradients, parameters)):
+                if i < len(device_states):
+                    state = device_states[i]
+                    
+                    # Simple SGD update (can be extended to Adam, etc.)
+                    if 'momentum' in state:
+                        # Momentum update
+                        state['momentum'] = 0.9 * state['momentum'] + learning_rate * grad
+                        param.data -= state['momentum']
+                    else:
+                        # Simple gradient descent
+                        param.data -= learning_rate * grad
+                        
+                    logger.debug(f"Device {device_rank}: Updated parameter {i}")
+                else:
+                    logger.warning(f"Device {device_rank}: No optimizer state for parameter {i}")
+            
+            logger.info(f"Device {device_rank}: Successfully applied {len(gradients)} gradients")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to apply gradients on device {device_rank}: {e}")
+            return False
+
 def create_optimizer_sharding_manager(world_size: int, device_rank: int, 
                                     distributed_backend_type: str = "multiprocess") -> OptimizerShardingManager:
     """Factory function to create an optimizer sharding manager."""

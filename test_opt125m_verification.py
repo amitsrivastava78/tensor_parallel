@@ -129,7 +129,7 @@ def test_opt125m_parameter_sharding():
     tp_model = TensorParallelKeras(
         model=opt_model,
         world_size=4,  # Use 4 devices for better sharding demonstration
-        distributed_backend='fallback'
+        distributed_backend_type='fallback'
     )
     
     # Count sharded parameters (FSDP approach)
@@ -182,7 +182,7 @@ def test_opt125m_inference_correctness():
     tp_model = TensorParallelKeras(
         model=opt_model,
         world_size=2,
-        distributed_backend='fallback'
+        distributed_backend_type='fallback'
     )
     
     print(f"✅ {time.time() - start_time:.2f}s: Models created successfully")
@@ -230,7 +230,7 @@ def test_opt125m_training_verification():
     tp_model = TensorParallelKeras(
         model=opt_model,
         world_size=2,
-        distributed_backend='fallback'
+        distributed_backend_type='fallback'
     )
     
     print(f"✅ {time.time() - start_time:.2f}s: Models created successfully")

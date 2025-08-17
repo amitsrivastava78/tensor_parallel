@@ -44,7 +44,7 @@ def test_bert_tiny_model():
     tp_bert = TensorParallelKeras(
         model=bert_model,
         world_size=2,
-        distributed_backend='fallback'
+        distributed_backend_type='fallback'
     )
     print(f"✅ {time.time() - start_time:.2f}s: Tensor parallel BERT model created successfully")
     
@@ -114,7 +114,7 @@ def test_gpt2_model():
     tp_gpt2 = TensorParallelKeras(
         model=gpt2_model,
         world_size=2,
-        distributed_backend='fallback'
+        distributed_backend_type='fallback'
     )
     print(f"✅ {time.time() - start_time:.2f}s: Tensor parallel GPT-2 model created successfully")
     
@@ -160,7 +160,7 @@ def test_roberta_model():
     tp_roberta = TensorParallelKeras(
         model=roberta_model,
         world_size=2,
-        distributed_backend='fallback'
+        distributed_backend_type='fallback'
     )
     print(f"✅ {time.time() - start_time:.2f}s: Tensor parallel RoBERTa model created successfully")
     
@@ -205,7 +205,7 @@ def test_training_with_kerasnlp():
     tp_bert = TensorParallelKeras(
         model=bert_model,
         world_size=2,
-        distributed_backend='fallback'
+        distributed_backend_type='fallback'
     )
     
     print(f"✅ {time.time() - start_time:.2f}s: Models created successfully")
@@ -292,7 +292,7 @@ def test_einsum_dense_layers():
     tp_model = TensorParallelKeras(
         model=model,
         world_size=4,
-        distributed_backend='fallback'
+        distributed_backend_type='fallback'
     )
     
     print(f"✅ {time.time() - start_time:.2f}s: Tensor parallel EinsumDense model created successfully")
@@ -371,7 +371,7 @@ def test_mixed_layer_types():
     tp_model = TensorParallelKeras(
         model=model,
         world_size=2,
-        distributed_backend='fallback'
+        distributed_backend_type='fallback'
     )
     
     print(f"✅ {time.time() - start_time:.2f}s: Tensor parallel mixed layer model created successfully")
