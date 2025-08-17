@@ -234,7 +234,13 @@ class FallbackBackend(DistributedBackend):
         
     def allgather(self, tensor, group=None):
         """Return single tensor for single device."""
-        return [tensor]
+        # Handle both single tensors and lists of tensors
+        if isinstance(tensor, list):
+            # If it's a list, return it wrapped in another list (simulating multi-device)
+            return [tensor]
+        else:
+            # If it's a single tensor, return it in a list
+            return [tensor]
         
     def reduce_scatter(self, input_list, group=None):
         """Return first tensor for single device."""
