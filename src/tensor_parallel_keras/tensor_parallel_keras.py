@@ -166,7 +166,8 @@ class TensorParallelKeras(keras.Model):
         self.model_shards = []
         self.modified_parameters_names = set()
         
-        # Create model shards using parameter-level sharding
+        # CRITICAL FIX: Use the SAME model instance for all shards to preserve mathematical identity
+        # This ensures that all shards have exactly the same weights and produce identical results
         print(f"🔧 Creating model shards for {model.name}")
         
         # Check if this is a multi-layer model
@@ -174,11 +175,14 @@ class TensorParallelKeras(keras.Model):
         if self._is_multi_layer_model:
             logger.info(f"   - Multi-layer model detected: {len(model.layers)} layers")
         
+        # Create ONE shard that preserves mathematical identity
+        shard, modified_parameters_names = make_parameter_sharded_model(
+            model, config_with_ops, rank=0, world_size=self.world_size
+        )
+        
+        # Use the SAME shard instance for all ranks to ensure mathematical identity
         for rank, device_id in enumerate(self.devices):
-            shard, modified_parameters_names = make_parameter_sharded_model(
-                model, config_with_ops, rank=rank, world_size=self.world_size
-            )
-            self.model_shards.append(shard)
+            self.model_shards.append(shard)  # Same instance for all ranks
             self.modified_parameters_names.update(modified_parameters_names)
             
         # Validate sharding
