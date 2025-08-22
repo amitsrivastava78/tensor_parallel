@@ -265,15 +265,98 @@ class TensorParallelCommunicator:
         """
         Backward pass for row-parallel layers (conjugate of forward).
         
+        CRITICAL FIX: Row-parallel backward should be identity (no communication).
+        
         Args:
             partial_gradients: List of partial gradients from each shard
+            dim: Dimension to concatenate along (not used for identity)
+            
+        Returns:
+            List of gradients unchanged (identity operation)
+        """
+        logger.debug(f"Backward row-parallel: Identity operation (no communication) for {len(partial_gradients)} gradients")
+        # CRITICAL FIX: Return gradients unchanged - no communication needed
+        # This is because forward AllReduce means all shards get same gradient
+        return partial_gradients
+    
+    def forward_column_parallel_with_next_op_check(self, partial_outputs: List, next_op_is_dense: bool, dim: int = -1):
+        """
+        Forward pass for column-parallel layers with next operation check.
+        
+        Rule: If next op is dense, no communication. If next op is non-dense, AllGather.
+        
+        Args:
+            partial_outputs: List of partial outputs from each shard
+            next_op_is_dense: Whether the next operation is a dense layer
             dim: Dimension to concatenate along
             
         Returns:
-            Concatenated gradients (AllGather result)
+            Either partial outputs (no communication) or concatenated output (AllGather result)
         """
-        logger.debug(f"Backward row-parallel: AllGather {len(partial_gradients)} gradients along dim {dim}")
-        return self.allgather(partial_gradients)
+        if next_op_is_dense:
+            logger.debug(f"Forward column-parallel: No communication (next op is dense)")
+            # Return partial outputs unchanged - no communication needed
+            return partial_outputs
+        else:
+            logger.debug(f"Forward column-parallel: AllGather {len(partial_outputs)} outputs along dim {dim}")
+            # AllGather for non-dense next operations
+            return self.allgather(partial_outputs)
+    
+    def forward_row_parallel_always_allreduce(self, partial_outputs: List, op: str = "sum") -> List:
+        """
+        Forward pass for row-parallel layers.
+        
+        Rule: Always AllReduce regardless of next operation.
+        
+        Args:
+            partial_outputs: List of partial outputs from each shard
+            op: Reduction operation ("sum" or "mean")
+            
+        Returns:
+            List of synchronized outputs (AllReduce result)
+        """
+        logger.debug(f"Forward row-parallel: Always AllReduce {len(partial_outputs)} outputs with op {op}")
+        return self.allreduce(partial_outputs)
+    
+    def detect_next_op_type(self, current_layer_name: str, model_layers: List) -> bool:
+        """
+        Detect whether the next operation after the current layer is dense.
+        
+        Args:
+            current_layer_name: Name of the current layer
+            model_layers: List of all model layers
+            
+        Returns:
+            True if next op is dense, False otherwise
+        """
+        try:
+            # Find current layer index
+            current_index = None
+            for i, layer in enumerate(model_layers):
+                if layer.name == current_layer_name:
+                    current_index = i
+                    break
+            
+            if current_index is None or current_index >= len(model_layers) - 1:
+                # Last layer or not found - assume non-dense
+                return False
+            
+            # Check next layer
+            next_layer = model_layers[current_index + 1]
+            next_layer_type = type(next_layer).__name__.lower()
+            
+            # Check if next layer is dense
+            is_dense = any(dense_type in next_layer_type for dense_type in [
+                'dense', 'linear', 'conv', 'conv2d', 'conv1d', 'conv3d'
+            ])
+            
+            logger.debug(f"Next op after {current_layer_name}: {next_layer.name} ({next_layer_type}) - Dense: {is_dense}")
+            return is_dense
+            
+        except Exception as e:
+            logger.warning(f"Could not detect next op type: {e}")
+            # Default to non-dense for safety
+            return False
     
     def handle_mlp_handshake(self, 
                             up_projection_outputs: List,
@@ -408,6 +491,188 @@ def allgather_outputs(outputs: List, world_size: int, dim: int = -1):
     """
     allgather_op = AllGatherKeras(world_size, dim=dim)
     return allgather_op(outputs)
+
+
+def manage_dropout_rng_state(operation_type: str, world_size: int, base_seed: int = None) -> dict:
+    """
+    Manage Random Number Generator state for Dropout operations.
+    
+    This implements the critical rule for dropout correctness in tensor parallelism:
+    - Replicated Regions: Same RNG seed across all devices (same dropout mask)
+    - Parallel Regions: Different RNG seed per device (different dropout masks)
+    
+    Args:
+        operation_type: Either "replicated" or "parallel"
+        world_size: Total number of devices
+        base_seed: Base seed for RNG generation
+        
+    Returns:
+        Dictionary with RNG state information for each device
+    """
+    if base_seed is None:
+        base_seed = int(np.random.randint(0, 2**32 - 1))
+    
+    rng_states = {}
+    
+    if operation_type == "replicated":
+        # Replicated regions: Same RNG seed for all devices
+        # This ensures the same dropout mask is applied across all devices
+        for device_id in range(world_size):
+            rng_states[device_id] = {
+                "seed": base_seed,
+                "type": "replicated",
+                "description": "Same dropout mask across all devices"
+            }
+        logger.info(f"Applied replicated RNG state: seed={base_seed} for {world_size} devices")
+        
+    elif operation_type == "parallel":
+        # Parallel regions: Different RNG seed per device
+        # This ensures different dropout masks for different shards
+        for device_id in range(world_size):
+            device_seed = base_seed + device_id
+            rng_states[device_id] = {
+                "seed": device_seed,
+                "type": "parallel", 
+                "description": f"Unique dropout mask for device {device_id}"
+            }
+        logger.info(f"Applied parallel RNG state: seeds={[base_seed + i for i in range(world_size)]} for {world_size} devices")
+        
+    else:
+        raise ValueError(f"Invalid operation_type: {operation_type}. Must be 'replicated' or 'parallel'")
+    
+    return rng_states
+
+
+def apply_dropout_rng_state(rng_states: dict, device_id: int) -> None:
+    """
+    Apply the RNG state for a specific device.
+    
+    Args:
+        rng_states: Dictionary of RNG states from manage_dropout_rng_state
+        device_id: ID of the current device
+    """
+    if device_id not in rng_states:
+        raise ValueError(f"Device {device_id} not found in RNG states")
+    
+    rng_info = rng_states[device_id]
+    seed = rng_info["seed"]
+    
+    # Set the RNG seed for this device
+    np.random.seed(seed)
+    import keras
+    keras.utils.set_random_seed(seed)
+    
+    logger.debug(f"Applied RNG state for device {device_id}: seed={seed}, type={rng_info['type']}")
+
+
+def get_cuda_rng_tracker_equivalent(world_size: int, base_seed: int = None) -> dict:
+    """
+    Equivalent to Megatron-LM's get_cuda_rng_tracker function.
+    
+    This manages RNG state for parallel operations where each device
+    needs a different dropout mask (mathematically correct behavior).
+    
+    Args:
+        world_size: Total number of devices
+        base_seed: Base seed for RNG generation
+        
+    Returns:
+        Dictionary with parallel RNG states for each device
+    """
+    return manage_dropout_rng_state("parallel", world_size, base_seed)
+
+
+def get_replicated_rng_tracker(world_size: int, base_seed: int = None) -> dict:
+    """
+    Get RNG tracker for replicated operations.
+    
+    This ensures the same dropout mask is applied across all devices
+    for operations that are replicated (like dropout after residual add).
+    
+    Args:
+        world_size: Total number of devices
+        base_seed: Base seed for RNG generation
+        
+    Returns:
+        Dictionary with replicated RNG states for all devices
+    """
+    return manage_dropout_rng_state("replicated", world_size, base_seed)
+
+
+def handle_embedding_vocab_sharding(embeddings: List, world_size: int) -> List:
+    """
+    Handle embedding vocabulary sharding with AllReduce.
+    
+    This implements the VocabParallelEmbedding rule:
+    - Forward pass: Local lookup + AllReduce for partial results
+    - Backward pass: Sharded gradients (no initial communication)
+    
+    Args:
+        embeddings: List of embedding outputs from each shard
+        world_size: Total number of shards
+        
+    Returns:
+        List of synchronized embedding outputs for each shard
+    """
+    if len(embeddings) != world_size:
+        raise ValueError(f"Expected {world_size} embedding outputs, got {len(embeddings)}")
+    
+    # For vocabulary sharding, we need AllReduce to combine partial results
+    # Each shard only has a piece of the vocabulary, so we sum the partial embeddings
+    
+    # Use the existing AllReduce operation
+    allreduce_op = AllReduceKeras(world_size, op="sum")
+    synchronized_embeddings = allreduce_op(embeddings)
+    
+    logger.info(f"Applied AllReduce for embedding vocabulary sharding across {world_size} shards")
+    
+    return synchronized_embeddings
+
+
+def add_bias_after_allreduce(outputs: List, biases: List, world_size: int) -> List:
+    """
+    Add bias to outputs after AllReduce operation for row-parallel layers.
+    
+    This is crucial for proper tensor parallelism bias handling:
+    - Row-parallel biases are replicated (not sharded)
+    - They must be added AFTER AllReduce completes
+    - Each device adds the same bias to its portion of the output
+    
+    Args:
+        outputs: List of outputs from each shard (after AllReduce)
+        biases: List of bias tensors (should be identical across shards)
+        world_size: Total number of shards
+        
+    Returns:
+        List of outputs with bias added
+    """
+    if len(outputs) != world_size or len(biases) != world_size:
+        raise ValueError(f"Expected {world_size} outputs and biases, got {len(outputs)} and {len(biases)}")
+    
+    # Verify all biases are identical (they should be replicated)
+    first_bias = biases[0]
+    for i, bias in enumerate(biases[1:], 1):
+        # Use numpy for comparison since inputs might be numpy arrays
+        if hasattr(first_bias, 'numpy'):
+            first_bias_np = first_bias.numpy()
+        else:
+            first_bias_np = first_bias
+            
+        if hasattr(bias, 'numpy'):
+            bias_np = bias.numpy()
+        else:
+            bias_np = bias
+            
+        if not np.allclose(first_bias_np, bias_np, atol=1e-6):
+            logger.warning(f"Bias {i} differs from bias 0 - this may indicate incorrect bias sharding")
+    
+    # Add bias to each output
+    biased_outputs = []
+    for output, bias in zip(outputs, biases):
+        biased_output = output + bias
+        biased_outputs.append(biased_output)
+    
+    return biased_outputs
 
 
 def broadcast_parameters(parameters: List, world_size: int, src_rank: int = 0) -> List:

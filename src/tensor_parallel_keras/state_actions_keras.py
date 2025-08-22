@@ -26,17 +26,23 @@ class SplitKeras(StateActionKeras):
     def __init__(self, world_size: int, dim: int, sharding_type: str = "auto"):
         self.world_size = world_size
         self.dim = dim
-        self.sharding_type = sharding_type  # "auto", "row", "column"
+        self.sharding_type = sharding_type  # "auto", "row", "column", "vocab_parallel"
         
-        # Auto-determine dimension based on sharding type if dim is -1
+        # Auto-determine dimension based on sharding type if dim == -1
         if dim == -1 and sharding_type != "auto":
             if sharding_type == "row":
                 self.dim = 0
             elif sharding_type == "column":
                 self.dim = 1
+            elif sharding_type == "vocab_parallel":
+                self.dim = 0  # Vocabulary dimension is typically dim=0
         
     def __call__(self, tensor: torch.Tensor, rank: int) -> torch.Tensor:
         """Split tensor and return the portion for this rank."""
+        # Handle replicated sharding (no splitting)
+        if self.sharding_type == "replicated":
+            return tensor  # Return full tensor unchanged
+        
         if self.dim == -1:
             dim = tensor.dim() - 1
         else:
@@ -72,6 +78,12 @@ class SplitKeras(StateActionKeras):
             
     def undo(self, tensors: Sequence[torch.Tensor]) -> torch.Tensor:
         """Concatenate split tensors back together."""
+        # Handle replicated sharding (no concatenation needed)
+        if self.sharding_type == "replicated":
+            # For replicated tensors, all shards should be identical
+            # Return the first one since they're all the same
+            return tensors[0]
+        
         if self.dim == -1:
             dim = tensors[0].dim() - 1
         else:

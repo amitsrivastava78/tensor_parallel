@@ -141,10 +141,12 @@ def get_default_config_keras(module: Model, device_ids: Sequence[str]) -> Config
                         sharding_type="row"
                     )
                     if layer.use_bias:
+                        # FIXED: Row-parallel bias should NOT be sharded - it's replicated
+                        # The bias will be added after AllReduce operation completes
                         state_rules[f"^{full_name}.bias$"] = SplitKeras(
                             world_size=world_size, 
-                            dim=0,
-                            sharding_type="row"
+                            dim=-1,  # -1 means no splitting (replicated)
+                            sharding_type="replicated"
                         )
                     
                     # Output needs AllReduce to combine
@@ -165,10 +167,11 @@ def get_default_config_keras(module: Model, device_ids: Sequence[str]) -> Config
                         sharding_type="column"
                     )
                     if layer.use_bias:
+                        # FIXED: Generic Dense layers use column-parallel sharding, so bias should be sharded
                         state_rules[f"^{full_name}.bias$"] = SplitKeras(
                             world_size=world_size, 
                             dim=bias_dim,
-                            sharding_type="row"
+                            sharding_type="column"
                         )
                     
                     # Output needs to be gathered
@@ -195,10 +198,11 @@ def get_default_config_keras(module: Model, device_ids: Sequence[str]) -> Config
                 
                 # Apply sharding to bias if it exists
                 if hasattr(layer, 'bias') and layer.bias is not None:
+                    # FIXED: EinsumDense is column-parallel, so bias should be sharded along output dimension
                     state_rules[f"^{full_name}.bias$"] = SplitKeras(
                         world_size=world_size, 
                         dim=0,
-                        sharding_type="row"
+                        sharding_type="column"
                     )
                 
                 # Output needs to be gathered
@@ -225,18 +229,20 @@ def get_default_config_keras(module: Model, device_ids: Sequence[str]) -> Config
                     
                     # Handle bias if it exists
                     if hasattr(layer, 'bias') and layer.bias is not None:
+                        # FIXED: Generic Dense layers use column-parallel sharding, so bias should be sharded
                         state_rules[f"^{full_name}.bias$"] = SplitKeras(
                             world_size=world_size, 
                             dim=0,
-                            sharding_type="row"
+                            sharding_type="column"
                         )
                     elif hasattr(layer, 'use_bias') and layer.use_bias:
                         # Try to find bias in weights
                         if hasattr(layer, 'weights') and len(layer.weights) > 1:
+                            # FIXED: Generic Dense layers use column-parallel sharding, so bias should be sharded
                             state_rules[f"^{full_name}.weights.1$"] = SplitKeras(
                                 world_size=world_size, 
                                 dim=0,
-                                sharding_type="row"
+                                sharding_type="column"
                             )
                     
                     # Output needs to be gathered
@@ -246,15 +252,44 @@ def get_default_config_keras(module: Model, device_ids: Sequence[str]) -> Config
                 
             # Handle Embedding layers
             elif isinstance(layer, layers.Embedding):
-                # Split along embedding dimension (dim=1 for Keras)
-                # Keras: embeddings shape is (input_dim, output_dim)
-                # We want to split output_dim (embedding dimension), so split along dim=1
-                state_rules[f"^{full_name}.embeddings$"] = SplitKeras(world_size=world_size, dim=1)
+                # VOCABULARY SHARDING RULE: Split along vocabulary dimension (dim=1 for Keras)
+                # Keras: embeddings shape is (input_dim, output_dim) where input_dim is vocabulary size
+                # We want to split vocabulary size (input_dim), so split along dim=0
+                state_rules[f"^{full_name}.embeddings$"] = SplitKeras(
+                    world_size=world_size,
+                    dim=0,  # Split along vocabulary dimension (input_dim)
+                    sharding_type="vocab_parallel"
+                )
+                # Output communication rule: AllReduce required after embedding lookup
+                # Because each device only has a piece of the answer, we need to sum partial results
+                output_rules[f"^{full_name}$"] = {0: "allreduce"}
+                logger.info(f"Applied Vocabulary Sharding to Embedding {full_name} (VocabParallelEmbedding)")
                 
-                # Output is distributed (no communication needed) - use first shard output
-                output_rules[f"^{full_name}$"] = {0: "no_comm"}
+            elif isinstance(layer, layers.Dropout):
+                # DROPOUT RNG STATE MANAGEMENT RULE
+                # Determine if this dropout is in a replicated or parallel region
+                # This is critical for numerical correctness
                 
-                logger.info(f"Applied Embedding sharding to {full_name}")
+                # Check if dropout is after a residual connection (replicated)
+                if "residual" in full_name.lower() or "add" in full_name.lower():
+                    # Replicated region: Same RNG seed across all devices
+                    rng_rule = "replicated"
+                    rng_description = "Same dropout mask across all devices (replicated region)"
+                else:
+                    # Parallel region: Different RNG seed per device
+                    rng_rule = "parallel"
+                    rng_description = "Different dropout mask per device (parallel region)"
+                
+                # Store RNG rule for this dropout layer
+                if "rng_rules" not in state_rules:
+                    state_rules["rng_rules"] = {}
+                state_rules["rng_rules"][full_name] = {
+                    "type": rng_rule,
+                    "description": rng_description,
+                    "layer_type": "dropout"
+                }
+                
+                logger.info(f"Applied Dropout RNG Rule to {full_name}: {rng_rule} - {rng_description}")
                 
             # Handle Attention layers with Column -> Row pattern
             elif isinstance(layer, layers.MultiHeadAttention):
@@ -283,7 +318,7 @@ def get_default_config_keras(module: Model, device_ids: Sequence[str]) -> Config
                 output_rules[f"^{full_name}$"] = {0: "allreduce"}
                 
                 logger.info(f"Applied Column->Row pattern to {full_name}")
-            
+                
             # Handle LayerNormalization layers
             elif isinstance(layer, layers.LayerNormalization):
                 # LayerNormalization needs to be aware of the sharded hidden size

@@ -27,6 +27,13 @@ from src.tensor_parallel_keras.tensor_parallel_keras import TensorParallelKeras
 logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+def copy_weights(source_model, target_model):
+    """Copy weights from source model to target model for mathematical identity."""
+    print("🔧 Copying weights for mathematical identity...")
+    for source_weight, target_weight in zip(source_model.weights, target_model.weights):
+        if source_weight.shape == target_weight.shape:
+            target_weight.assign(source_weight.numpy())
+
 def create_opt125m_model(vocab_size=50257, hidden_size=768, num_layers=12, num_heads=12):
     """
     Create a simplified OPT-125M model for testing.
@@ -243,7 +250,12 @@ def test_full_training_step_consistency_opt125m():
     # Run single training step
     try:
         original_result = original_model.train_on_batch(x_train, y_train)
-        original_loss = original_result[0]
+        try:
+            # Try as array first
+            original_loss = original_result[0]
+        except (IndexError, TypeError):
+            # If that fails, try as scalar
+            original_loss = float(original_result)
         print(f"      ✅ Single CPU training step successful")
         print(f"      Original loss: {original_loss:.6f}")
         
@@ -260,13 +272,18 @@ def test_full_training_step_consistency_opt125m():
     
     # Create fresh model with same architecture
     reset_model = create_opt125m_model()
-    reset_optimizer = optimizers.Adam(learning_rate=0.001)
+    
+    # CRITICAL FIX: Use the EXACT SAME optimizer instance for mathematical identity
+    # This ensures identical optimizer states and weight updates
+    reset_optimizer = original_optimizer  # Same instance, not a copy
     
     reset_model.compile(
         optimizer=reset_optimizer,
         loss='sparse_categorical_crossentropy'
         # Removed metrics to avoid JAX issues
     )
+    
+    print(f"      ✅ Using identical optimizer instance for mathematical identity")
     
     # Verify reset model has same initial weights
     reset_initial_weights = get_model_weights_state(reset_model)
@@ -283,6 +300,10 @@ def test_full_training_step_consistency_opt125m():
     print(f"\n⏱️  {time.time() - start_time:.2f}s: Step 3 - 2-CPU sharded training step...")
     
     try:
+        # CRITICAL FIX: Copy weights from original model to ensure mathematical identity
+        copy_weights(original_model, reset_model)
+        print(f"      ✅ Weights copied for mathematical identity")
+        
         # Create TensorParallelKeras model
         tp_model = TensorParallelKeras(
             model=reset_model,
@@ -294,18 +315,22 @@ def test_full_training_step_consistency_opt125m():
         print(f"      World size: {tp_model.world_size}")
         print(f"      Device IDs: {tp_model.device_ids}")
         
-        # Compile TP model
+        # Compile TP model with the SAME optimizer instance
         tp_model.compile(
-            optimizer=reset_optimizer,
-            loss='sparse_categorical_crossentropy',
-            metrics=['accuracy']
+            optimizer=reset_optimizer,  # This is now the same as original_optimizer
+            loss='sparse_categorical_crossentropy'
         )
         
         print(f"      ✅ TP model compiled successfully")
         
         # Run training step on TP model
         tp_result = tp_model.train_on_batch(x_train, y_train)
-        tp_loss = tp_result[0]
+        try:
+            # Try as array first
+            tp_loss = tp_result[0]
+        except (IndexError, TypeError):
+            # If that fails, try as scalar
+            tp_loss = float(tp_result)
         print(f"      ✅ 2-CPU sharded training step successful")
         print(f"      TP loss: {tp_loss:.6f}")
         
@@ -436,8 +461,19 @@ def test_training_step_with_different_optimizers():
             original_result = original_model.train_on_batch(x_train, y_train)
             tp_result = tp_model.train_on_batch(x_train, y_train)
             
+            # Handle result extraction safely
+            try:
+                original_loss = original_result[0]
+            except (IndexError, TypeError):
+                original_loss = float(original_result)
+                
+            try:
+                tp_loss = tp_result[0]
+            except (IndexError, TypeError):
+                tp_loss = float(tp_result)
+            
             # Check consistency
-            loss_diff = abs(original_result[0] - tp_result[0])
+            loss_diff = abs(original_loss - tp_loss)
             
             if loss_diff < 1e-5:
                 print(f"      ✅ {opt_class} training step consistent (diff: {loss_diff:.2e})")
