@@ -59,22 +59,22 @@ class SplitKeras(StateActionKeras):
         start_idx = rank * split_size + min(rank, remainder)
         end_idx = start_idx + split_size + (1 if rank < remainder else 0)
         
-
-        
         # Split the tensor
         if dim == 0:
-            return tensor[start_idx:end_idx]
+            result = tensor[start_idx:end_idx]
         elif dim == 1:
-            return tensor[:, start_idx:end_idx]
+            result = tensor[:, start_idx:end_idx]
         elif dim == 2:
-            return tensor[:, :, start_idx:end_idx]
+            result = tensor[:, :, start_idx:end_idx]
         elif dim == 3:
-            return tensor[:, :, :, start_idx:end_idx]
+            result = tensor[:, :, :, start_idx:end_idx]
         else:
             # For higher dimensions, use advanced indexing
             slices = [slice(None)] * tensor.dim()
             slices[dim] = slice(start_idx, end_idx)
-            return tensor[tuple(slices)]
+            result = tensor[tuple(slices)]
+        
+        return result
             
     def undo(self, tensors: Sequence[torch.Tensor]) -> torch.Tensor:
         """Concatenate split tensors back together."""

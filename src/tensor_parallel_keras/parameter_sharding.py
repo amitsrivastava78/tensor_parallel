@@ -163,7 +163,7 @@ class ParameterShardingStrategy:
         
     def shard_model_parameters(self, model: Model, config: ConfigKeras) -> Tuple[Model, Set[str]]:
         """
-        Shard model parameters without rebuilding the model structure.
+        Shard model parameters for REAL tensor parallelism.
         
         Args:
             model: Original Keras model
@@ -172,16 +172,22 @@ class ParameterShardingStrategy:
         Returns:
             Tuple of (sharded_model, modified_parameter_names)
         """
-        print(f"🔧 Applying parameter-level sharding to {model.name}")
+        print(f"🔧 Applying REAL parameter-level sharding to {model.name}")
         
-        # CRITICAL FIX: For mathematical identity, don't create new weights
-        # Just return the original model to ensure exact same computation
-        
-        # Store original weights for reference (but don't modify them)
+        # Store original weights for reference
         self._store_original_weights(model)
         
-        # Mark parameters as "sharded" for tracking, but don't actually change them
+        # Mark parameters as "sharded" for tracking
         modified_parameters = set()
+        
+        # Get the JAX backend for real parameter sharding
+        try:
+            from .backend_interface import get_default_backend
+            backend = get_default_backend()
+            use_real_sharding = backend.is_real_backend()
+        except:
+            use_real_sharding = False
+            print("⚠️  No real backend available, using simplified sharding")
         
         for pattern, action in config.state_rules.items():
             if isinstance(action, StateActionKeras):
@@ -189,25 +195,44 @@ class ParameterShardingStrategy:
                 matching_params = self._find_matching_parameters(model, pattern)
                 
                 for param_name, param in matching_params:
-                    # Store original weight (not sharded) for mathematical identity
-                    self.sharded_weights[param_name] = param  # Use original, not sharded
-                    self.weight_mapping[param_name] = {
-                        'original_shape': param.shape,
-                        'sharded_shape': param.shape,  # Same shape for identity
-                        'action': action
-                    }
+                    if use_real_sharding:
+                        # REAL SHARDING: Actually split the parameter
+                        sharded_param = self._apply_real_sharding(param, action, param_name)
+                        self.sharded_weights[param_name] = sharded_param
+                        
+                        self.weight_mapping[param_name] = {
+                            'original_shape': param.shape,
+                            'sharded_shape': sharded_param.shape,
+                            'action': action,
+                            'sharding_type': 'real'
+                        }
+                        
+                        print(f"   ✅ REAL SHARDED {param_name}: {param.shape} -> {sharded_param.shape}")
+                    else:
+                        # Fallback: preserve mathematical identity
+                        self.sharded_weights[param_name] = param
+                        self.weight_mapping[param_name] = {
+                            'original_shape': param.shape,
+                            'sharded_shape': param.shape,
+                            'action': action,
+                            'sharding_type': 'identity'
+                        }
+                        print(f"   ✅ Preserved {param_name}: {param.shape} (mathematical identity)")
                     
                     modified_parameters.add(param_name)
-                    print(f"   ✅ Preserved {param_name}: {param.shape} (mathematical identity)")
         
-        # Create a wrapper model that preserves mathematical identity
+        # Create a wrapper model
         sharded_model = ParameterShardedModel(
             original_model=model,
             sharding_strategy=self,
             config=config
         )
         
-        print(f"🎯 Parameter sharding completed: {len(modified_parameters)} parameters preserved for mathematical identity")
+        if use_real_sharding:
+            print(f"🎯 REAL parameter sharding completed: {len(modified_parameters)} parameters actually sharded")
+        else:
+            print(f"🎯 Parameter sharding completed: {len(modified_parameters)} parameters preserved for mathematical identity")
+        
         return sharded_model, modified_parameters
     
     def _store_original_weights(self, model: Model):
@@ -218,7 +243,7 @@ class ParameterShardingStrategy:
                     param_name = f"{layer.name}.{weight.name}"
                     self.original_weights[param_name] = weight.numpy()
     
-    def _find_matching_parameters(self, model: Model, pattern: str) -> List[Tuple[str, torch.Tensor]]:
+    def _find_matching_parameters(self, model: Model, pattern: str) -> List[Tuple[str, Any]]:
         """Find parameters that match the given pattern."""
         matching_params = []
         
@@ -232,8 +257,13 @@ class ParameterShardingStrategy:
                     for weight in layer.weights:
                         param_name = f"{full_name}.{weight.name}"
                         if re.match(pattern, param_name):
-                            # Convert Keras weight to PyTorch tensor for processing
-                            weight_tensor = torch.tensor(weight.numpy())
+                            # Convert Keras weight to tensor for processing
+                            if hasattr(weight, 'numpy'):
+                                weight_tensor = torch.tensor(weight.numpy())
+                            else:
+                                # Handle case where weight is already a tensor
+                                weight_tensor = weight
+                            
                             matching_params.append((param_name, weight_tensor))
                             
                 # Recursively search submodules
@@ -242,6 +272,26 @@ class ParameterShardingStrategy:
                     
         search_module(model)
         return matching_params
+    
+    def _apply_real_sharding(self, param: torch.Tensor, action: StateActionKeras, param_name: str) -> torch.Tensor:
+        """Apply real parameter sharding using the action."""
+        try:
+            # Apply the sharding action to get the actual sharded parameter
+            sharded_param = action(param, self.rank)
+            
+            # Verify the sharded parameter is different from original
+            if hasattr(sharded_param, 'shape') and hasattr(param, 'shape'):
+                if sharded_param.shape == param.shape:
+                    print(f"   ⚠️  Warning: {param_name} sharding didn't change shape: {param.shape} -> {sharded_param.shape}")
+                else:
+                    print(f"   ✅ Real sharding confirmed: {param_name} {param.shape} -> {sharded_param.shape}")
+            
+            return sharded_param
+            
+        except Exception as e:
+            print(f"   ❌ Real sharding failed for {param_name}: {e}")
+            print(f"   ⚠️  Falling back to identity preservation")
+            return param
     
     def get_sharded_weight(self, param_name: str) -> Optional[np.ndarray]:
         """Get sharded weight for a parameter."""
@@ -865,17 +915,67 @@ class ParameterShardedModel:
         if hasattr(self, 'sharding_strategy') and hasattr(self.sharding_strategy, 'sharded_weights'):
             # Return the actual sharded weights for tensor parallelism
             sharded_weights = []
-            for weight in self.original_model.weights:
+            
+            # Get the original model weights to maintain order and names
+            original_weights = self.original_model.weights
+            
+            for weight in original_weights:
                 weight_name = weight.name
+                
+                # Try to find the sharded weight by exact name matching first
+                sharded_weight = None
+                
+                # Look for exact match first
                 if weight_name in self.sharding_strategy.sharded_weights:
+                    sharded_weight = self.sharding_strategy.sharded_weights[weight_name]
+                    print(f"   🔧 Exact match: {weight_name} -> {sharded_weight.shape}")
+                else:
+                    # Try to find by full weight path
+                    # Get the layer name from the weight's parent layer
+                    layer_name = None
+                    for layer in self.original_model.layers:
+                        if hasattr(layer, 'weights'):
+                            # Use safer comparison to avoid TensorFlow errors
+                            try:
+                                if any(w is weight for w in layer.weights):
+                                    layer_name = layer.name
+                                    break
+                            except:
+                                # Fallback: compare by name and shape
+                                if hasattr(weight, 'name') and hasattr(weight, 'shape'):
+                                    for w in layer.weights:
+                                        if (hasattr(w, 'name') and w.name == weight.name and 
+                                            hasattr(w, 'shape') and w.shape == weight.shape):
+                                            layer_name = layer.name
+                                            break
+                                    if layer_name:
+                                        break
+                    
+                    if layer_name:
+                        # Construct the full weight name: layer_name.weight_name
+                        full_weight_name = f"{layer_name}.{weight_name}"
+                        
+                        if full_weight_name in self.sharding_strategy.sharded_weights:
+                            sharded_weight = self.sharding_strategy.sharded_weights[full_weight_name]
+                            print(f"   🔧 Full path match: {weight_name} -> {full_weight_name} -> {sharded_weight.shape}")
+                        else:
+                            print(f"   ⚠️  No sharded weight found for {full_weight_name}")
+                    else:
+                        print(f"   ⚠️  Could not determine layer for weight {weight_name}")
+                
+                if sharded_weight is not None:
                     # Use the sharded weight
-                    sharded_weights.append(self.sharding_strategy.sharded_weights[weight_name])
+                    sharded_weights.append(sharded_weight)
                 else:
                     # Fallback to original weight if not sharded
+                    print(f"   ⚠️  No sharded weight found for {weight_name}, using original")
                     sharded_weights.append(weight)
+            
+            print(f"   ✅ Returned {len(sharded_weights)} weights (mix of sharded and original)")
             return sharded_weights
         else:
             # Fallback to original weights if no sharding strategy
+            print(f"   ⚠️  No sharding strategy, returning original weights")
             return self.original_model.weights
     
     def count_params(self):
